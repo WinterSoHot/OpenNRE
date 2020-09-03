@@ -115,6 +115,7 @@ def SentenceRELoader(path, rel2id, tokenizer, batch_size,
 
 class BagREDataset(data.Dataset):
     """
+    实现Bag level的DataSet
     Bag-level relation extraction dataset. Note that relation of NA should be named as 'NA'.
     """
     def __init__(self, path, rel2id, tokenizer, entpair_as_bag=False, bag_size=0, mode=None):
@@ -128,40 +129,40 @@ class BagREDataset(data.Dataset):
                 relation labels)
         """
         super().__init__()
-        self.tokenizer = tokenizer
-        self.rel2id = rel2id
-        self.entpair_as_bag = entpair_as_bag
-        self.bag_size = bag_size
+        self.tokenizer = tokenizer # 分词
+        self.rel2id = rel2id # 关系 Id 对应
+        self.entpair_as_bag = entpair_as_bag # 如何构造包，根据实体对还是facts
+        self.bag_size = bag_size # Bag的大小
 
-        # Load the file
+        # Load the file 读取文件
         f = open(path)
         self.data = []
         for line in f:
             line = line.rstrip()
             if len(line) > 0:
-                self.data.append(eval(line))
+                self.data.append(eval(line)) # 每一行为JSON格式的记录
         f.close()
 
         # Construct bag-level dataset (a bag contains instances sharing the same relation fact)
         if mode == None:
             self.weight = np.ones((len(self.rel2id)), dtype=np.float32)
-            self.bag_scope = []
-            self.name2id = {}
-            self.bag_name = []
+            self.bag_scope = [] # 保存包的范围
+            self.name2id = {} # 对应的Bag名对应的Id
+            self.bag_name = [] # Bag name
             self.facts = {}
             for idx, item in enumerate(self.data):
-                fact = (item['h']['id'], item['t']['id'], item['relation'])
-                if item['relation'] != 'NA':
+                fact = (item['h']['id'], item['t']['id'], item['relation']) # 提取当前记录的Fact
+                if item['relation'] != 'NA': # 如果relation已知则增加到facts中
                     self.facts[fact] = 1
                 if entpair_as_bag:
-                    name = (item['h']['id'], item['t']['id'])
+                    name = (item['h']['id'], item['t']['id']) # 根据entpair_as_bag如何构建Bag name
                 else:
                     name = fact
-                if name not in self.name2id:
+                if name not in self.name2id: # 将 Bag name 加入 name2id 中
                     self.name2id[name] = len(self.name2id)
                     self.bag_scope.append([])
                     self.bag_name.append(name)
-                self.bag_scope[self.name2id[name]].append(idx)
+                self.bag_scope[self.name2id[name]].append(idx) # 将当前数据的index加入对应的bag_scope中，bag_name-->id作为key查找
                 self.weight[self.rel2id[item['relation']]] += 1.0
             self.weight = 1.0 / (self.weight ** 0.05)
             self.weight = torch.from_numpy(self.weight)
@@ -172,18 +173,23 @@ class BagREDataset(data.Dataset):
         return len(self.bag_scope)
 
     def __getitem__(self, index):
-        bag = self.bag_scope[index]
+        # 根据 index 获取当前的bag
+        bag = self.bag_scope[index] # bag 中为相关数据的 索引列表
+        # 根据设置的bag_size 对当前bag进行采样
         if self.bag_size > 0:
             if self.bag_size <= len(bag):
                 resize_bag = random.sample(bag, self.bag_size)
             else:
                 resize_bag = bag + list(np.random.choice(bag, self.bag_size - len(bag)))
             bag = resize_bag
-            
+        
+        # 提取 相关的句子
         seqs = None
-        rel = self.rel2id[self.data[bag[0]]['relation']]
+        rel = self.rel2id[self.data[bag[0]]['relation']] # 将bag中的第一个instance的关系作为bag的关系
+        # 遍历包，将data中的数据取出
         for sent_id in bag:
             item = self.data[sent_id]
+            # tokenizer 来自 encoder
             seq = list(self.tokenizer(item))
             if seqs is None:
                 seqs = []
@@ -213,14 +219,16 @@ class BagREDataset(data.Dataset):
         return [label, bag_name, scope] + seqs
 
     def collate_bag_size_fn(data):
+        # 对获取后的数据进行处理 这边的数据，每项都增加了一个batch_size Dimension
         data = list(zip(*data))
-        label, bag_name, count = data[:3]
+        label, bag_name, count = data[:3] # 标签、 bag_name、 bag的大小
         seqs = data[3:]
         for i in range(len(seqs)):
             seqs[i] = torch.stack(seqs[i], 0) # (batch, bag, L)
         scope = [] # (B, 2)
         start = 0
-        for c in count:
+
+        for c in count: # 在 batch 维度进行遍历，
             scope.append((start, start + c))
             start += c
         label = torch.tensor(label).long() # (B)
